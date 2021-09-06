@@ -1,0 +1,278 @@
+
+                          HtmlAgilityPack
+                          EPPlus
+                          Newtonsoft.Json
+                          System.Text.Json
+
+
+
+
+
+
+ public static void StartParser(string pathToFile)
+        {
+
+            if (pathToFile != null)
+            {
+                if (File.Exists(pathToFile))
+                {
+
+                    List<string> links = new List<string>();
+                    links = GetAllLinks(links, pathToFile);
+
+                    List<Comment> comments = new List<Comment>();
+
+                    Dictionary<int, List<Comment>> productComments = new Dictionary<int, List<Comment>>();
+                    productComments = ParseComments(comments, links);
+
+                    var file = new FileInfo("WildberriesReport.xlsx");
+                    SaveExcelFile(productComments, file);
+
+                }
+            }
+        }
+
+
+        private static List<string> GetAllLinks(List<string> links, string pathToFile)
+        {
+
+            using (StreamReader stream = new StreamReader(pathToFile))
+            {
+                string line;
+                int art;
+
+                while ((line = stream.ReadLine()) != null)
+                {
+                    if (line.Contains("https://"))
+                    {
+                        links.Add(line);
+                    }
+                    if (int.TryParse(line, out art))
+                    {
+                        string link = $"https://www.wildberries.ru/catalog/{art}/detail.aspx";
+
+                        links.Add(link);
+                    }
+                }
+            }
+
+            return links;
+        }
+
+        private static Dictionary<int, int> Attributes(List<string> links)
+        {
+            Dictionary<int, int> attributesProducts = new Dictionary<int, int>();
+
+            HtmlWeb web = new HtmlWeb();
+
+
+            foreach (var url in links)
+            {
+                HtmlDocument document = web.Load(url);
+
+                var text = document.DocumentNode.SelectSingleNode("//a[@id='a-Comments']").InnerText;
+                var countString = text.Replace("Îòçûâû", "").Trim();
+                int count = Convert.ToInt32(countString);
+
+
+                string data = document.ParsedText;
+                data = data.Replace(" ", "");
+
+                string textId;
+                textId = Between(data, ":{\"link\":", ",\"star\":");
+
+                int id = Convert.ToInt32(textId);
+
+
+                attributesProducts.Add(id, count);
+            }
+
+            return attributesProducts;
+
+        }
+
+        static string Between(string data, string start, string end)
+        {
+            int startIndex = data.IndexOf(start) + start.Length;
+            int endIndex = data.IndexOf(end, startIndex);
+            return data.Substring(startIndex, endIndex - startIndex);
+        }
+
+        private static Dictionary<int, List<Comment>> ParseComments(List<Comment> comments, List<string> links)
+        {
+            string urlPostQuery = "https://public-feedbacks.wildberries.ru/api/v1/feedbacks/site";
+
+
+            Dictionary<int, List<Comment>> productComments = new Dictionary<int, List<Comment>>();
+            int count = 0;
+
+            Dictionary<int, int> attributesProducts = new Dictionary<int, int>();
+            attributesProducts = Attributes(links);
+
+            foreach (var attribut in attributesProducts)
+            {
+
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(urlPostQuery);
+                request.Method = "POST";
+
+
+                List<Comment> allComments = new List<Comment>();
+                try
+                {
+                    QueryParams data = new QueryParams { imtId = attribut.Key, order = "dateDesc", skip = 0, take = attribut.Value };
+
+                    string json = JsonSerializer.Serialize<QueryParams>(data);
+                    byte[] bytes = Encoding.ASCII.GetBytes(json);
+
+
+                    using (Stream streamRequest = request.GetRequestStream())
+                    {
+                        streamRequest.Write(bytes, 0, bytes.Length);
+
+                        using (var response = request.GetResponse())
+                        {
+                            using (var streamResponse = response.GetResponseStream())
+                            {
+                                using (var streamReader = new StreamReader(streamResponse))
+                                {
+                                    var content = streamReader.ReadToEnd();
+
+                                    var jsonObject = JObject.Parse(content);
+                                    var nodeObject = jsonObject["feedbacks"];
+
+                                    foreach (var item in nodeObject)
+                                    {
+                                        Comment comment = new Comment();
+
+                                        var detailsUser = item["wbUserDetails"];
+                                        var name = detailsUser["name"];
+                                        comment.UserName = name.ToString();
+
+                                        var date = item["createdDate"];
+                                        comment.CommentPostingDate = date.ToString();
+
+                                        var text = item["text"];
+                                        comment.ReviewText = text.ToString();
+
+                                        var prodValuation = item["productValuation"];
+                                        comment.ReviewRating = prodValuation.ToString();
+
+                                        var pros = item["pros"];
+                                        comment.NumberOfLikes = pros.ToString() == "" ? "0" : pros.ToString();
+
+                                        var cons = item["cons"];
+                                        comment.NumberOfDislikes = cons.ToString() == "" ? "0" : cons.ToString();
+
+                                        //comments.Add(comment);
+                                        allComments.Add(comment);
+                                    }
+
+
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine(e);
+                }
+
+                productComments.Add(count, allComments);
+                count++;
+            }
+            return productComments;
+        }
+
+
+        private static void SaveExcelFile(Dictionary<int, List<Comment>> comments, FileInfo file)
+        {
+            DeleteIfExists(file);
+
+            for (int i = 0; i < comments.Count; i++)
+            {
+
+                using (var package = new ExcelPackage(file))
+                {
+                    var ws = package.Workbook.Worksheets.Add($"Wildberries{i}");
+
+                    var range = ws.Cells["A1"].LoadFromCollection(comments[i], true);
+                    range.AutoFitColumns();
+
+                    package.Save();
+                }
+
+            }
+
+        }
+
+        private static void DeleteIfExists(FileInfo file)
+        {
+            if (file.Exists) { file.Delete(); }
+        }
+
+
+
+
+
+
+
+
+
+
+namespace ConsoleApp20.Models
+{
+    class Comment
+    {
+        public string UserName { get; set; }
+        public string CommentPostingDate { get; set; }
+        public string ReviewText { get; set; }
+        public string ReviewRating { get; set; }
+        public string NumberOfLikes { get; set; }
+        public string NumberOfDislikes { get; set; }
+    }
+}
+
+
+
+
+namespace ConsoleApp20.Models
+{
+    class QueryParams
+    {
+        public int imtId { get; set; }
+        public int skip { get; set; }
+        public int take { get; set; }
+        public string order { get; set; }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
